@@ -1,0 +1,73 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---------- Виртуальные окружения ----------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# ---------- Тесты / кэш ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+
+# ---------- Streamlit ----------
+.streamlit/secrets.toml
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- ОС ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Данные игроков ----------
+# Раскомментируйте, если не хотите пушить базу игроков в репозиторий
+# players.xlsx
+# *.xlsx
+# *.xls
+# *.csv
+
+# ---------- Логи / временные ----------
+*.log
+*.tmp
+*.bak
+tmp/
+temp/
