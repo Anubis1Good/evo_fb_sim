@@ -37,17 +37,26 @@ def get_schemas():
 @st.cache_data(show_spinner=False)
 def cached_build_team(kind, name, readiness_hash):
     df = st.session_state.df
-    team = M.get_team(df, kind, name)
-    if len(team) == 0:
+    team_full = M.get_team(df, kind, name)
+    if len(team_full) == 0:
         return None
-    team = M.augment_with_phantoms(team, max_total=22, penalty=30.0)
+
+    # Отделяем тренера от полевых
+    coaches = team_full[team_full['позиция'] == 'Т']
+    coach = coaches.sort_values('ОР', ascending=False).iloc[0] if len(coaches) else None
+    field = team_full[team_full['позиция'] != 'Т'].copy()
+
+    # Добиваем только полевых (тренера уже выделили)
+    field = M.augment_with_phantoms(field, max_total=22, penalty=50.0)
+
     schemas = get_schemas()
-    schema_name, _ = M.pick_best_schema(team, schemas)
+    schema_name, _ = M.pick_best_schema(field, schemas)
     vec = schemas[schema_name]
-    lineup, total, used = M.pick_lineup(team, vec)
-    bench, coach = M.pick_bench(team, vec, used)
+    lineup, total, used = M.pick_lineup(field, vec)
+    bench, _coach2 = M.pick_bench(field, vec, used)
+
     return dict(
-        team=team, schema=schema_name, vec=vec,
+        team=field, schema=schema_name, vec=vec,
         lineup=lineup, total=total, bench=bench, coach=coach,
     )
 
@@ -336,13 +345,24 @@ if res_home and res_away:
         if exp:
             st.caption(
                 f"ОР: {exp['or_home']:.1f} vs {exp['or_away']:.1f}  "
-                f"(Δ = {exp['or_diff']:+.1f})  |  "
+                f"(Δ = {exp['or_diff']:+.1f}, с домом {exp['or_diff_eff']:+.1f})  |  "
                 f"xG: {exp['xg_home']:.2f} vs {exp['xg_away']:.2f}  |  "
+                f"ожидаемый счёт (Пуассон): {exp['target_home_goals']}:{exp['target_away_goals']}  |  "
+                f"xG: {exp['xg_home']:.2f} vs {exp['xg_away']:.2f}  "
+f"(реальный {exp.get('xg_home_real', 0):.2f} vs {exp.get('xg_away_real', 0):.2f})  |  "
                 f"P(победа хозяев) ≈ {exp['p_home_win_logit']:.2f}  |  "
                 f"дом: {'вкл' if exp['home_adv_on'] else 'выкл'} "
-                f"(множитель ×{exp['home_strength_mult']:.2f})"
+                f"(×{exp['home_strength_mult']:.2f}, Δ+{exp['home_or_bonus']:+.1f})"
             )
-
+        if exp.get('legendary_match'):
+            lt = exp.get('legendary_team')
+            team_name = team_home if lt == 'home' else team_away
+            st.markdown('# 🌟 ЛЕГЕНДАРНЫЙ МАТЧ')
+            st.markdown(f'**{team_name} сегодня играет на пределе возможностей (+50%).**')
+        if exp.get('super_home'):
+            st.markdown('🔥 **Супермотивация хозяев** (+25%)')
+        if exp.get('super_away'):
+            st.markdown('🔥 **Супермотивация гостей** (+25%)')
         stats = result['stats']
         st.markdown(
             f"**Владение:** {stats['home']['possession']}% — "
@@ -455,7 +475,9 @@ if res_home and res_away:
             for e in result['events']:
                 team_name = team_home if e['team'] == 'home' else team_away
                 line = f"{e['minute']:>3}'  [{team_name}]  "
-                if e['type'] == 'goal':
+                if e['type'] == 'shot_on':
+                    line += f"🥅 {e['detail']}"
+                elif e['type'] == 'goal':
                     assist = f" (пас: {e['assister']})" if e.get('assister') else ""
                     line += f"⚽ ГОЛ — {e['scorer']}{assist}  — {e.get('detail','')}"
                 elif e['type'] == 'yellow':

@@ -20,19 +20,33 @@ CONFIG = {
     'readiness_tau': 20 / np.log(200),
 
     # ---------- ОЖИДАЕМЫЕ ГОЛЫ (Пуассон) ----------
-    # xg_home = xg_slope * p_home, где p_home = 1 / (1 + 10^(-Δ / xg_scale))
-    # Δ — эффективная разница ОР с учётом дома.
-    # Чем меньше xg_scale, тем круче кривая.
-    'xg_slope': 8.00,          # потолок xg (реальный счёт редко превышает)
-    'xg_scale': 60,            # крутизна. 60 — рабочий вариант
-    'xg_max': 12.00,           # абсолютный потолок
-    'home_adv_or_bonus': 8.0,  # сдвиг Δ в пользу хозяев (× home_adv_strength)
-    'home_strength_bonus': 0.06,  # +6% к боевым статам хозяев при strength=1.0
+    'xg_slope': 8.00,
+    'xg_scale': 60,
+    'xg_max': 12.00,
+    'home_adv_or_bonus': 8.0,
+    'home_strength_bonus': 0.06,
 
     # ---------- ВЛАДЕНИЕ ----------
     'possession_scale': 15,
     'possession_clip_min': 0.15,
     'possession_clip_max': 0.85,
+
+    # ---------- СУПЕРМОТИВАЦИЯ ----------
+    'super_motivation_chance': 0.10,
+    'super_motivation_mult': 1.25,
+
+    # ---------- ЛЕГЕНДАРНЫЙ МАТЧ ----------
+    # Редкое событие для ОДНОЙ случайной команды: она играет на пределе
+    # возможностей (+50% к боевым статам). Команда выбирается случайно,
+    # не зависит от силы.
+    'legendary_match_chance': 0.05,   # ~1.5% (1 из ~67 матчей)
+    'legendary_match_mult': 2.00,
+
+    # ---------- НИЧЬИ ----------
+    'draw_threshold': 25,
+    'draw_max_chance': 0.35,
+    'draw_min_chance': 0.01,
+    'draw_score_gap_max': 3,
 
     # ---------- УСТАЛОСТЬ ----------
     'fatigue_threshold': 55,
@@ -45,14 +59,14 @@ CONFIG = {
     'corner_goal_base': 0.06,
     'corner_goal_slope': 0.08,
     'penalty_goal_base': 0.78,
-    'penalty_from_foul': 0.03,     # шанс, что фол в штрафной даёт пенальти
+    'penalty_from_foul': 0.03,
     'fk_goal_base': 0.05,
     'fk_goal_slope': 0.06,
     'yellow_from_foul': 0.10,
-    'red_from_foul': 0.015,
+    'red_from_foul': 0.05,
 
     # ---------- НАСТРОЙКИ ПО УМОЛЧАНИЮ ----------
-    'default_n_episodes_per_block': 8,
+    'default_n_episodes_per_block': 15,
     'default_home_adv_on': True,
     'default_home_adv_strength': 1.0,
 }
@@ -132,7 +146,7 @@ def _sigmoid(x):
 # СИЛА КОМАНДЫ
 # =========================================================
 def team_strength(lineup, coach, aura_opp=0.0, fatigue_map=None, home_bonus_mult=1.0):
-    """home_bonus_mult — множитель боевых статов (для дома > 1.0)."""
+    """home_bonus_mult — общий множитель боевых статов (дом + мотивация)."""
     if fatigue_map is None:
         fatigue_map = {}
 
@@ -284,24 +298,38 @@ def simulate_match(lineup_home, coach_home,
         home_strength_mult = 1.0 + CONFIG['home_strength_bonus'] * home_adv_strength
         home_or_bonus = CONFIG['home_adv_or_bonus'] * home_adv_strength
 
-    or_diff_eff = (OR_home * home_strength_mult + home_or_bonus) - OR_away
-    or_diff_raw = OR_home - OR_away
+    # ---- легендарный матч (для ОДНОЙ случайной команды) ----
+    legendary_match = False
+    legendary_team = None
+    if random() < CONFIG['legendary_match_chance']:
+        legendary_match = True
+        legendary_team = choice(['home', 'away'])
 
-    # ---- xG по логистике с основанием 10 (крутая кривая) ----
-    p_home_rate = 1.0 / (1.0 + 10 ** (-or_diff_eff / CONFIG['xg_scale']))
-    xg_home = CONFIG['xg_slope'] * p_home_rate
-    xg_away = CONFIG['xg_slope'] * (1.0 - p_home_rate)
-    xg_home = min(CONFIG['xg_max'], xg_home)
-    xg_away = min(CONFIG['xg_max'], xg_away)
+    # ---- мотивация ----
+    motivation_home = 1.0
+    motivation_away = 1.0
+    super_home = False
+    super_away = False
 
-    # ---- ИТОГОВЫЙ СЧЁТ разыгрываем ОДИН РАЗ как Пуассон ----
-    target_home_goals = int(np.random.poisson(xg_home))
-    target_away_goals = int(np.random.poisson(xg_away))
+    if legendary_match:
+        base_mult = CONFIG['legendary_match_mult']
+        if legendary_team == 'home':
+            motivation_home = base_mult
+        else:
+            motivation_away = base_mult
+    else:
+        if random() < CONFIG['super_motivation_chance']:
+            motivation_home = CONFIG['super_motivation_mult']
+            super_home = True
+        if random() < CONFIG['super_motivation_chance']:
+            motivation_away = CONFIG['super_motivation_mult']
+            super_away = True
 
-    goals_left_home = target_home_goals
-    goals_left_away = target_away_goals
+    # общий множитель: дом × мотивация
+    home_strength_total = home_strength_mult * motivation_home
+    away_strength_total = motivation_away
 
-    # ---- усталость ----
+    # ---- усталость (инициализация) ----
     fatigue = {}
     for pos, plist in lineup_home.items():
         for p in plist:
@@ -310,8 +338,47 @@ def simulate_match(lineup_home, coach_home,
         for p in plist:
             fatigue[p['Имя_чистое']] = 0.0
 
-    S_home_pre = team_strength(lineup_home, coach_home, fatigue_map=fatigue)
-    S_away_pre = team_strength(lineup_away, coach_away, fatigue_map=fatigue)
+    S_home_pre = team_strength(lineup_home, coach_home, fatigue_map=fatigue,
+                               home_bonus_mult=home_strength_total)
+    S_away_pre = team_strength(lineup_away, coach_away, fatigue_map=fatigue,
+                               home_bonus_mult=away_strength_total)
+
+    # ---- предварительная оценка владения ----
+    mid_home_avg = (0.40 * S_home_pre['pass_mid'] + 0.60 * OR_home) * home_strength_total
+    mid_away_avg = (0.40 * S_away_pre['pass_mid'] + 0.60 * OR_away) * away_strength_total
+    diff_avg = mid_home_avg - mid_away_avg
+    p_raw_avg = _sigmoid(diff_avg / CONFIG['possession_scale'])
+    p_home_poss_avg = 0.50 + 0.55 * (p_raw_avg - 0.5)
+    p_home_poss_avg = float(np.clip(p_home_poss_avg,
+                                     CONFIG['possession_clip_min'],
+                                     CONFIG['possession_clip_max']))
+
+    # ---- xG с учётом доли эпизодов ----
+    or_diff_eff = (OR_home * home_strength_total + home_or_bonus) - (OR_away * away_strength_total)
+    or_diff_raw = OR_home - OR_away
+
+    # доля xG = логистика от or_diff_eff
+    p_home_rate = 1.0 / (1.0 + 10 ** (-or_diff_eff / CONFIG['xg_scale']))
+    # доля эпизодов — с учётом xG (то, что уже сделано)
+    xg_share_home = p_home_rate
+    # итоговый xG = сколько голов команда может забить при своей доле эпизодов
+    # исходим из того, что 1 гол ≈ 2.5 удара ≈ 4 эпизода
+    total_ep_expected = 6 * n_episodes_per_block   # ~48
+    ep_home_expected = total_ep_expected * xg_share_home
+    ep_away_expected = total_ep_expected * (1 - xg_share_home)
+    # конверсия эпизода в гол ~ 8% для лучших команд, 3% для слабых
+    # но мы хотим сохранить пропорциональность через xg_slope
+    xg_home = CONFIG['xg_slope'] * xg_share_home * (0.5 + p_home_poss_avg)
+    xg_away = CONFIG['xg_slope'] * (1.0 - xg_share_home) * (1.5 - p_home_poss_avg)
+    xg_home = min(CONFIG['xg_max'], xg_home)
+    xg_away = min(CONFIG['xg_max'], xg_away)
+
+    # ---- целевой счёт по Пуассону (для отображения в expected) ----
+    target_home_goals = int(np.random.poisson(xg_home))
+    target_away_goals = int(np.random.poisson(xg_away))
+    # goals_left — не используется в новой модели, но оставим для совместимости
+    goals_left_home = 0
+    goals_left_away = 0
 
     events = []
     score = {'home': 0, 'away': 0}
@@ -422,7 +489,7 @@ def simulate_match(lineup_home, coach_home,
     def reduce_strength(side):
         if red_cards[side] == 0:
             return 1.0
-        return max(0.55, 1.0 - 0.15 * red_cards[side])
+        return max(0.40, 1.0 - 0.30 * red_cards[side])
 
     def find_fatigued(lineup, positions):
         cands = []
@@ -547,7 +614,6 @@ def simulate_match(lineup_home, coach_home,
     blocks = [(1, 15), (16, 30), (31, 45), (46, 60), (61, 75), (76, 90)]
 
     for (m_start, m_end) in blocks:
-        # усталость
         for side, lineup, opp_or, own_or in (
             ('home', lineup_home, OR_away, OR_home),
             ('away', lineup_away, OR_home, OR_away),
@@ -561,7 +627,6 @@ def simulate_match(lineup_home, coach_home,
                         fatigue.get(name, 0) + _fatigue_growth(p, opp_ratio, m_end, pos)
                     )
 
-        # замены/травмы
         if m_start >= 46:
             sub_minute = randint(m_start, m_end)
             try_tactical_substitution(lineup_home, 'home', sub_minute, bench_home)
@@ -572,14 +637,13 @@ def simulate_match(lineup_home, coach_home,
 
         S_home = team_strength(lineup_home, coach_home,
                                aura_opp=S_away_pre['aura'], fatigue_map=fatigue,
-                               home_bonus_mult=home_strength_mult)
+                               home_bonus_mult=home_strength_total)
         S_away = team_strength(lineup_away, coach_away,
                                aura_opp=S_home_pre['aura'], fatigue_map=fatigue,
-                               home_bonus_mult=1.0)
+                               home_bonus_mult=away_strength_total)
 
-        # владение — комбинация pass_mid и общего ОР
-        mid_home = (0.40 * S_home['pass_mid'] + 0.60 * OR_home) * reduce_strength('home')
-        mid_away = (0.40 * S_away['pass_mid'] + 0.60 * OR_away) * reduce_strength('away')
+        mid_home = (0.40 * S_home['pass_mid'] + 0.60 * OR_home) * reduce_strength('home') * home_strength_total
+        mid_away = (0.40 * S_away['pass_mid'] + 0.60 * OR_away) * reduce_strength('away') * away_strength_total
         diff = mid_home - mid_away
         p_raw = _sigmoid(diff / CONFIG['possession_scale'])
         p_home_poss = 0.50 + 0.55 * (p_raw - 0.5)
@@ -588,7 +652,12 @@ def simulate_match(lineup_home, coach_home,
                                      CONFIG['possession_clip_max']))
 
         n_ep = n_episodes_per_block + randint(-2, 2)
-        n_ep_home = int(round(n_ep * p_home_poss))
+        # доля эпизодов = среднее между владением и xG-share
+        xg_total = max(0.01, xg_home + xg_away)
+        xg_share_home = xg_home / xg_total
+        episode_share_home = 0.5 * p_home_poss + 0.5 * xg_share_home
+        episode_share_home = float(np.clip(episode_share_home, 0.20, 0.80))
+        n_ep_home = int(round(n_ep * episode_share_home))
         n_ep_away = n_ep - n_ep_home
         episode_sides = ['home'] * n_ep_home + ['away'] * n_ep_away
         shuffle(episode_sides)
@@ -627,7 +696,6 @@ def simulate_match(lineup_home, coach_home,
             dribble_ok = random() < p_dribble(att, dfd) * red_mult_att
 
             if not dribble_ok:
-                # фол, карточки, пенальти, штрафной
                 if dfd is not None and random() < 0.30:
                     stats['away' if home_side else 'home']['fouls'] += 1
                     dfd_perks = _parse_perks(dfd.get('Перки'))
@@ -663,7 +731,6 @@ def simulate_match(lineup_home, coach_home,
                             gk_f = fatigue.get(gk['Имя_чистое'], 0)
                             p_pen *= (1 - min(0.30, _perk_sum(gk_perks, 'save', gk_f)))
                         if random() < p_pen and goals_left_home + goals_left_away > 0:
-                            # пенальти реализуется, если у команды ещё есть «долг»
                             if (home_side and goals_left_home > 0) or ((not home_side) and goals_left_away > 0):
                                 score[pen_team] += 1
                                 if home_side:
@@ -722,97 +789,157 @@ def simulate_match(lineup_home, coach_home,
                                 })
                 continue
 
-            # -------- УДАР --------
+            # -------- УДАР (только считаем, голы разыграем в конце) --------
             stats[side]['shots'] += 1
             gk = pick_gk(lineup_def)
-            home_bonus = 0.0
+            gk_name = gk['Имя_чистое'] if gk is not None else 'вратарь'
 
-            p_g = p_goal_from_shot(att, dfd, gk, home_bonus=home_bonus)
-
-            # Проверяем, есть ли у команды «долг» по голам
-            side_goals_left = goals_left_home if home_side else goals_left_away
-            total_left = goals_left_home + goals_left_away
-
-            if total_left <= 0:
-                # все голы уже разыграны — эпизод превращается в сейв/мимо/угловой
-                roll = random()
-                if roll < 0.30:
-                    stats[side]['on_target'] += 1
-                    gk_name = gk['Имя_чистое'] if gk is not None else 'вратарь'
-                    events.append({'minute': minute, 'type': 'save', 'team': side,
-                                   'detail': f"{gk_name} отбил удар {att['Имя_чистое']}"})
-                elif roll < 0.50:
-                    stats[side]['corners'] += 1
-                    events.append({'minute': minute, 'type': 'corner',
-                                   'team': side, 'detail': 'угловой'})
-                else:
-                    events.append({'minute': minute, 'type': 'miss', 'team': side,
-                                   'detail': f"{att['Имя_чистое']} пробил мимо"})
-                continue
-
-            # если у команды нет «долга» — она почти не забивает в этом эпизоде
-            if side_goals_left <= 0:
-                p_g *= 0.10
-            else:
-                # усиливаем шанс, если у команды много голов «в запасе»
-                p_g *= (1 + 0.30 * side_goals_left)
-                p_g = min(p_g, 0.85)
+            # Разделяем удары на три типа для статистики и последующей
+            # реализации голов. Сама реализация — в конце матча.
+            # Точность удара зависит от Удара игрока против ОР вратаря
+            att_shot = float(att['Удар']) * _fatigue_mult(fatigue.get(att['Имя_чистое'], 0))
+            gk_rating = float(gk['ОР']) if gk is not None else 50.0
+            # вероятность попасть в створ ~ от Удара
+            p_on_target = 0.35 + 0.35 * _sigmoid((att_shot - 60) / 20)
+            p_on_target = float(np.clip(p_on_target, 0.20, 0.75))
 
             roll = random()
-            if roll < p_g:
-                # ГОЛ
-                score[side] += 1
+            if roll < p_on_target:
+                # в створ
                 stats[side]['on_target'] += 1
-                if home_side:
-                    goals_left_home = max(0, goals_left_home - 1)
-                else:
-                    goals_left_away = max(0, goals_left_away - 1)
-                assister = None
-                if random() < CONFIG['assist_chance']:
-                    assister = pick_assist(lineup_att, att['Имя_чистое'])
                 events.append({
-                    'minute': minute, 'type': 'goal', 'team': side,
-                    'scorer': att['Имя_чистое'],
-                    'assister': assister['Имя_чистое'] if assister is not None else None,
-                    'detail': 'гол' if assister is not None else 'индивидуальный гол'
+                    'minute': minute, 'type': 'shot_on',
+                    'team': side,
+                    'shooter': att['Имя_чистое'],
+                    'xg_shot': att_shot / 100.0,   # 0.5..0.9 примерно
+                    'detail': f"{att['Имя_чистое']} бьёт в створ ({gk_name})"
                 })
-            elif roll < p_g + 0.20:
-                stats[side]['on_target'] += 1
-                gk_name = gk['Имя_чистое'] if gk is not None else 'вратарь'
-                events.append({
-                    'minute': minute, 'type': 'save', 'team': side,
-                    'detail': f"{gk_name} отбил удар {att['Имя_чистое']}"
-                })
-            elif roll < p_g + 0.30:
+            elif roll < p_on_target + 0.35:
+                # угловой
                 stats[side]['corners'] += 1
-                p_corner_goal = CONFIG['corner_goal_base'] + CONFIG['corner_goal_slope'] * _sigmoid(
-                    (S_att['air_att'] - S_def['air_def']) / 18)
-                if random() < p_corner_goal and side_goals_left > 0:
-                    score[side] += 1
-                    if home_side:
-                        goals_left_home = max(0, goals_left_home - 1)
-                    else:
-                        goals_left_away = max(0, goals_left_away - 1)
-                    tall_cands = sorted(
-                        [p for pos, plist in lineup_att.items()
-                         for p in plist if pos in ('ЦЗ', 'ЦН', 'ОФ', 'ОПЗ')],
-                        key=lambda p: -float(p['Верх'])
-                    )
-                    scorer = tall_cands[0] if tall_cands else att
-                    events.append({
-                        'minute': minute, 'type': 'goal', 'team': side,
-                        'scorer': scorer['Имя_чистое'], 'assister': None,
-                        'detail': 'гол с углового'
-                    })
-                    stats[side]['goals_from_corner'] += 1
-                else:
-                    events.append({'minute': minute, 'type': 'corner',
-                                   'team': side, 'detail': 'угловой'})
+                events.append({
+                    'minute': minute, 'type': 'corner',
+                    'team': side,
+                    'detail': 'угловой'
+                })
             else:
-                events.append({'minute': minute, 'type': 'miss',
-                               'team': side, 'detail': f"{att['Имя_чистое']} пробил мимо"})
+                # мимо
+                events.append({
+                    'minute': minute, 'type': 'miss',
+                    'team': side,
+                    'detail': f"{att['Имя_чистое']} пробил мимо"
+                })
 
-    # ---- финальная нормализация владения ----
+    # =====================================================
+    # РЕАЛИЗАЦИЯ ГОЛОВ
+    # =====================================================
+    # Для каждого удара в створ считаем вероятность гола от xg_shot и вратаря.
+    # Углы считаем отдельно.
+
+    def compute_goal_events(side):
+        lineup_def = lineup_away if side == 'home' else lineup_home
+        gk = pick_gk(lineup_def)
+        gk_rating = float(gk['ОР']) if gk is not None else 50.0
+        gk_perks = _parse_perks(gk.get('Перки')) if gk is not None else []
+        gk_save = _perk_sum(gk_perks, 'save')
+
+        goal_events = []
+        for i, e in enumerate(events):
+            if e['team'] != side:
+                continue
+            if e['type'] == 'shot_on':
+                # базовое качество удара
+                xg_shot = e.get('xg_shot', 0.6)
+                # 10% + 15% × (xg_shot - 0.5) + бонус от силы игрока
+                base = 0.10 + 0.30 * (xg_shot - 0.5)
+                # штраф от вратаря
+                base *= (1 - min(0.30, gk_save))
+                base *= (1 - min(0.20, (gk_rating - 70) / 100) if gk_rating > 70 else 1.0)
+                base = float(np.clip(base, 0.03, 0.45))
+                if random() < base:
+                    goal_events.append(i)
+            elif e['type'] == 'corner':
+                # угловой: ~4% гол
+                if random() < 0.04:
+                    goal_events.append(i)
+        return goal_events
+
+    home_goal_idx = compute_goal_events('home')
+    away_goal_idx = compute_goal_events('away')
+
+    for idx in home_goal_idx + away_goal_idx:
+        e = events[idx]
+        side = e['team']
+        lineup_att = lineup_home if side == 'home' else lineup_away
+        if e['type'] == 'shot_on':
+            scorer_name = e['shooter']
+        else:
+            tall_cands = sorted(
+                [p for pos, plist in lineup_att.items()
+                 for p in plist if pos in ('ЦЗ', 'ЦН', 'ОФ', 'ОПЗ')],
+                key=lambda p: -float(p['Верх'])
+            )
+            scorer_name = tall_cands[0]['Имя_чистое'] if tall_cands else 'игрок'
+        assister_name = None
+        if random() < CONFIG['assist_chance']:
+            assister = pick_assist(lineup_att, scorer_name)
+            if assister is not None:
+                assister_name = assister['Имя_чистое']
+        events[idx] = {
+            'minute': e['minute'],
+            'type': 'goal',
+            'team': side,
+            'scorer': scorer_name,
+            'assister': assister_name,
+            'detail': 'гол' if assister_name else 'индивидуальный гол',
+        }
+
+    score['home'] = sum(1 for i in home_goal_idx)
+    score['away'] = sum(1 for i in away_goal_idx)
+    # target_home_goals / target_away_goals оставляем такими, какими
+    # их разыграл Пуассон — они показывают "ожидаемый" счёт, а не итоговый.
+    # Обновляем статистику голов с пенальти/штрафных/угловых
+    # (они уже были добавлены в events при эпизодах — оставим как есть)
+    abs_diff = abs(or_diff_eff)
+    threshold = CONFIG['draw_threshold']
+    draw_max = CONFIG['draw_max_chance']
+    draw_min = CONFIG['draw_min_chance']
+    score_gap = abs(score['home'] - score['away'])
+
+    if score['home'] != score['away'] and score_gap <= CONFIG['draw_score_gap_max']:
+        t = max(0.0, 1.0 - abs_diff / threshold)
+        p_draw = draw_min + (draw_max - draw_min) * t
+        if random() < p_draw:
+            m = min(score['home'], score['away'])
+            removed_home = score['home'] - m
+            removed_away = score['away'] - m
+
+            goals_home_idx = [i for i, e in enumerate(events)
+                              if e['type'] == 'goal' and e['team'] == 'home']
+            goals_away_idx = [i for i, e in enumerate(events)
+                              if e['type'] == 'goal' and e['team'] == 'away']
+            to_remove = set()
+            for i in goals_home_idx[-removed_home:]:
+                to_remove.add(i)
+            for i in goals_away_idx[-removed_away:]:
+                to_remove.add(i)
+            events = [e for i, e in enumerate(events) if i not in to_remove]
+
+            stats['home']['on_target'] = max(0, stats['home']['on_target'] - removed_home)
+            stats['away']['on_target'] = max(0, stats['away']['on_target'] - removed_away)
+
+            total_removed = removed_home + removed_away
+            if total_removed > 0:
+                factor = 1.0 - min(0.5, total_removed * 0.15)
+                stats['home']['shots'] = int(stats['home']['shots'] * factor)
+                stats['away']['shots'] = int(stats['away']['shots'] * factor)
+                stats['home']['corners'] = int(stats['home']['corners'] * factor)
+                stats['away']['corners'] = int(stats['away']['corners'] * factor)
+
+            score['home'] = m
+            score['away'] = m
+
+    # ---- нормализация владения ----
     total_eps = possession_episodes['home'] + possession_episodes['away']
     if total_eps > 0:
         stats['home']['possession'] = int(round(possession_episodes['home'] / total_eps * 100))
@@ -823,10 +950,9 @@ def simulate_match(lineup_home, coach_home,
 
     events.sort(key=lambda e: e['minute'])
 
-    # Вероятность победы хозяев (для отображения) — оценочная,
-    # основана на эффективной разнице ОР.
     p_home_win = 1.0 / (1.0 + 10 ** (-or_diff_eff / 40))
-
+    xg_home_real = stats['home']['on_target'] * 0.14 + stats['home']['corners'] * 0.04
+    xg_away_real = stats['away']['on_target'] * 0.14 + stats['away']['corners'] * 0.04
     return {
         'score': score,
         'events': events,
@@ -840,14 +966,24 @@ def simulate_match(lineup_home, coach_home,
             'or_diff': or_diff_raw,
             'or_diff_eff': or_diff_eff,
             'home_strength_mult': home_strength_mult,
+            'away_strength_mult': away_strength_total,
             'home_or_bonus': home_or_bonus,
-            'xg_home': xg_home,
+            'xg_home': xg_home,              # теоретический xG (для инфо)
             'xg_away': xg_away,
             'target_home_goals': target_home_goals,
             'target_away_goals': target_away_goals,
+            'xg_home_real': xg_home_real,
+            'xg_away_real': xg_away_real,
             'p_home_win_logit': p_home_win,
+            'p_home_poss_avg': p_home_poss_avg,
             'home_adv_on': home_adv_on,
             'home_adv_strength': home_adv_strength,
+            'super_home': super_home,
+            'super_away': super_away,
+            'motivation_home': motivation_home,
+            'motivation_away': motivation_away,
+            'legendary_match': legendary_match,
+            'legendary_team': legendary_team,
         },
     }
 

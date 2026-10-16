@@ -277,17 +277,29 @@ def pick_lineup(players: pd.DataFrame, schema_vec, seed_val=None):
     orig_to_pos = {v: k for k, v in pos_to_orig.items()}
     used_pos_idx = {orig_to_pos[idx] for idx in used if idx in orig_to_pos}
 
+    # фантомы (Н.И.) должны выбираться только если реальных игроков не хватает.
+    # Даём им штраф в матрице рейтингов.
+    is_phantom = np.array([
+        str(players.iloc[i].get('Имя_чистое', '')).startswith('Н.И.')
+        for i in range(N)
+    ])
+    # штраф 30% к рейтингу — реальный игрок со средним ОР 60 всё равно
+    # выигрывает у фантома с 43.6
+    R = R * np.where(is_phantom[:, None], 0.7, 1.0)
+
     def cnt(j):
-        return int((R[:, j] > 0).sum())
+        # количество реальных игроков, способных закрыть позицию
+        real_mask = ~is_phantom
+        return int((R[real_mask, j] > 0).sum())
 
     order = sorted(range(len(positions)), key=cnt)
 
     chosen = {}
     for j in order:
         avail = [i for i in range(N)
-                 if i not in chosen.values()
-                 and i not in used_pos_idx
-                 and players.iloc[i]['позиция'] != 'В']
+                if i not in chosen.values()
+                and i not in used_pos_idx
+                and players.iloc[i]['позиция'] not in ('В', 'Т')]
         if not avail:
             break
         scores = R[avail, j]
@@ -332,17 +344,27 @@ def pick_lineup(players: pd.DataFrame, schema_vec, seed_val=None):
 # 7. СКАМЕЙКА
 # =========================================================
 def pick_bench(players: pd.DataFrame, schema_vec, used_idx, max_bench=10):
+    """
+    Скамейка: только реальные игроки. Фантомы (Н.И.) — только если
+    реальных игроков не хватает, и не больше 3 штук, чтобы не засорять.
+    """
     positions = schema_to_positions(schema_vec)
 
     rest = players.drop(index=list(used_idx), errors='ignore').copy()
     rest = rest[rest['позиция'] != 'Т']
     rest_no_gk = rest[rest['позиция'] != 'В'].copy()
 
+    # отделяем реальных и фантомов
+    real_mask = ~rest_no_gk['Имя_чистое'].astype(str).str.startswith('Н.И.')
+    real_players = rest_no_gk[real_mask].copy()
+    phantoms = rest_no_gk[~real_mask].copy()
+
     bench = []
     bench_idx = set()
 
+    # 1) по одному лучшему на каждую уникальную позицию схемы — только из реальных
     for pos in sorted(set(positions)):
-        cand = rest_no_gk[~rest_no_gk.index.isin(bench_idx)]
+        cand = real_players[~real_players.index.isin(bench_idx)]
         if len(cand) == 0:
             break
         cand = cand.copy()
@@ -353,7 +375,8 @@ def pick_bench(players: pd.DataFrame, schema_vec, used_idx, max_bench=10):
         if len(bench) >= max_bench:
             break
 
-    rest2 = rest_no_gk[~rest_no_gk.index.isin(bench_idx)].copy()
+    # 2) добираем лучших реальных по ОР
+    rest2 = real_players[~real_players.index.isin(bench_idx)].copy()
     rest2 = rest2.sort_values('ОР', ascending=False)
     for _, p in rest2.iterrows():
         if len(bench) >= max_bench:
@@ -361,6 +384,16 @@ def pick_bench(players: pd.DataFrame, schema_vec, used_idx, max_bench=10):
         real_pos = p.get('спец1') or p.get('позиция') or '—'
         bench.append((str(real_pos), p))
 
+    # 3) только если реальных совсем мало — добавляем максимум 3 фантома
+    if len(bench) < 5 and len(phantoms) > 0:
+        ph_sorted = phantoms.sort_values('ОР', ascending=False).head(3)
+        for _, p in ph_sorted.iterrows():
+            if len(bench) >= max_bench:
+                break
+            real_pos = p.get('спец1') or p.get('позиция') or '—'
+            bench.append((str(real_pos), p))
+
+    # тренер — отдельно
     coach_df = players[players['позиция'] == 'Т']
     coach = coach_df.sort_values('ОР', ascending=False).iloc[0] if len(coach_df) else None
 
