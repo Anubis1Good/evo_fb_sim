@@ -46,6 +46,7 @@ def cached_build_team(kind, name, readiness_hash):
     coach = coaches.sort_values('ОР', ascending=False).iloc[0] if len(coaches) else None
     field = team_full[team_full['позиция'] != 'Т'].copy()
 
+    field = M.apply_coach_to_team(field, coach)
     # Добиваем только полевых (тренера уже выделили)
     field = M.augment_with_phantoms(field, max_total=22, penalty=50.0)
 
@@ -90,8 +91,8 @@ POS_COORDS_REL = {
     'ЦПЗ': (0.62, 0.50),
     'ЛПЗ': (0.72, 0.15),
     'ППЗ': (0.72, 0.85),
-    'АПЗ': (0.82, 0.50),
-    'ОФ':  (0.90, 0.50),
+    'АПЗ': (0.72, 0.50),
+    'ОФ':  (0.85, 0.50),
     'ЦН':  (0.97, 0.50),
 }
 
@@ -127,6 +128,18 @@ def lineup_to_points(lineup, half):
 # =========================================================
 # РИСОВАНИЕ ПОЛЯ
 # =========================================================
+def _stat_line(p):
+    base = {s: float(p.get(f'{s}_база', p[s])) for s in M.STATS}
+    eff  = {s: float(p[s]) for s in M.STATS}
+    dom = M.STATS[M._dominant_idx(p)]
+    parts = []
+    for s in M.STATS:
+        if s == dom:
+            parts.append(f"{s}: {eff[s]:.0f} (дом)")
+        else:
+            parts.append(f"{s}: {base[s]:.0f}→{eff[s]:.0f}")
+    return '<br>'.join(parts)
+
 def draw_pitch(lineup_home, lineup_away, title=''):
     fig = go.Figure()
 
@@ -152,15 +165,17 @@ def draw_pitch(lineup_home, lineup_away, title=''):
                                  (lineup_away, 'away', '#d13438')]:
         for x, y, pos, p in lineup_to_points(lineup, half=half):
             name = p['Имя_чистое']
-            rating = float(p['ОР'])
+            rating = float(p.get('ОР_эфф', p['ОР']))
+            base_rating = float(p['ОР'])
             ready = int(p['Готовность'])
             perk = M.perk_display(p['Перки'])
 
             hover = (f"<b>{name}</b><br>"
-                     f"Позиция: {pos}<br>"
-                     f"ОР: {rating:.1f}<br>"
-                     f"Готовность: {ready:+d}"
-                     + (f"<br>Перк: {perk}" if perk else ""))
+                    f"Позиция: {pos}<br>"
+                    f"ОР: {base_rating:.1f} → {rating:.1f}<br>"
+                    f"Готовность: {ready:+d}"
+                    + (f"<br>Перк: {perk}" if perk else "")
+                    + "<br><br>" + _stat_line(p))
 
             label = f"<b>{name}</b><br>{rating:.0f} ({ready:+d})"
             if perk:
@@ -201,10 +216,15 @@ def lineup_to_records(lineup):
     rows = []
     for pos, plist in lineup.items():
         for pl in plist:
+            boost = float(pl.get('Тренер_буст', 0.0))
+            base_or = float(pl['ОР'])
+            eff_or = float(pl.get('ОР_эфф', base_or))
             rows.append(dict(
                 Поз=pos,
                 Имя=pl['Имя_чистое'],
-                ОР=round(float(pl['ОР']), 1),
+                ОР=round(base_or, 1),
+                ОР_эфф=round(eff_or, 1),
+                Буст=f"+{boost*100:.1f}%" if boost > 0 else "—",
                 Гот=int(pl['Готовность']),
                 Перк=M.perk_display(pl['Перки']),
             ))
@@ -222,7 +242,7 @@ def bench_to_records(bench):
         ))
     return rows
 
-def coach_line(coach):
+def coach_line(coach, prof=None):
     if coach is None:
         return None
     name = coach['Имя_чистое']
@@ -232,6 +252,11 @@ def coach_line(coach):
     s = f"**Тренер:** {name} — ОР {rating:.1f} ({ready:+d})"
     if perk:
         s += f" {perk}"
+    if prof is not None:
+        doms = sorted(M.STATS, key=lambda x: -prof[x])[:3]
+        best = ', '.join(f"{d} +{prof[d]*100:.0f}%" for d in doms if prof[d] > 0)
+        if best:
+            s += f"\n\n**Сильные стороны:** {best}"
     return s
 
 # =========================================================

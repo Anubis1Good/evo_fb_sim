@@ -43,13 +43,13 @@ CONFIG = {
     'legendary_match_mult': 2.00,
 
     # ---------- НИЧЬИ ----------
-    'draw_threshold': 25,
+    'draw_threshold': 20,
     'draw_max_chance': 0.35,
     'draw_min_chance': 0.01,
-    'draw_score_gap_max': 3,
+    'draw_score_gap_max': 2,
 
     # ---------- УСТАЛОСТЬ ----------
-    'fatigue_threshold': 55,
+    'fatigue_threshold': 45,
     'fatigue_decay_perks': 70,
     'injury_chance': 0.035,
     'max_subs': 5,
@@ -548,7 +548,7 @@ def simulate_match(lineup_home, coach_home,
             return
         if not bench:
             return
-        if minute < 45 or random() > 0.40:
+        if minute < 55 or random() > 0.55:
             return
         target = find_fatigued(lineup, ('ЦН', 'ОФ', 'АПЗ', 'ЛПЗ', 'ППЗ', 'ЦПЗ', 'ОПЗ'))
         if target is None:
@@ -627,10 +627,16 @@ def simulate_match(lineup_home, coach_home,
                         fatigue.get(name, 0) + _fatigue_growth(p, opp_ratio, m_end, pos)
                     )
 
-        if m_start >= 46:
-            sub_minute = randint(m_start, m_end)
-            try_tactical_substitution(lineup_home, 'home', sub_minute, bench_home)
-            try_tactical_substitution(lineup_away, 'away', sub_minute, bench_away)
+        # if m_start >= 46:
+        #     sub_minute = randint(m_start, m_end)
+        #     try_tactical_substitution(lineup_home, 'home', sub_minute, bench_home)
+        #     try_tactical_substitution(lineup_away, 'away', sub_minute, bench_away)
+        if m_end >= 55:                      # а не m_start >= 46
+            n_attempts = 2 if m_end < 75 else 3
+            for _ in range(n_attempts):
+                sub_minute = randint(max(55, m_start), m_end)
+                try_tactical_substitution(lineup_home, 'home', sub_minute, bench_home)
+                try_tactical_substitution(lineup_away, 'away', sub_minute, bench_away)
         injury_minute = randint(m_start, m_end)
         try_injury(lineup_home, 'home', injury_minute, bench_home)
         try_injury(lineup_away, 'away', injury_minute, bench_away)

@@ -109,7 +109,7 @@ def position_penalty(row, target_pos):
 
     if tg == base_group:
         return 0.10
-    return 0.20
+    return 0.90
 
 def effective_rating(row, target_pos):
     penalty = position_penalty(row, target_pos)
@@ -431,3 +431,69 @@ def perk_display(perk_value):
     if p == 0:
         return ''
     return f'★{p}'
+
+# =========================================================
+# ТРЕНЕРСКОЕ СООТВЕТСТВИЕ
+# =========================================================
+
+F_MAX = 0.25   # потолок усиления недоминирующих статов (при тренере 100)
+
+def _dominant_idx(player):
+    vals = [float(player[s]) for s in STATS]
+    return int(np.argmax(vals))
+
+def coach_profile(coach):
+    """dict s -> f(c[s]) ∈ [0, F_MAX], или None."""
+    if coach is None:
+        return None
+    return {s: F_MAX * (float(coach[s]) / 100.0) for s in STATS}
+
+def apply_coach(player, prof):
+    """Доминанта не меняется; остальные статы × (1 + f(c[dom]))."""
+    base = {s: float(player[s]) for s in STATS}
+    if prof is None:
+        return base
+    dom_i = _dominant_idx(player)
+    boost = prof[STATS[dom_i]]
+    return {s: (base[s] if i == dom_i else base[s] * (1.0 + boost))
+            for i, s in enumerate(STATS)}
+
+def apply_coach_to_team(team: pd.DataFrame, coach) -> pd.DataFrame:
+    prof = coach_profile(coach)
+    if prof is None:
+        return team.copy()
+
+    out = team.copy()
+
+    # 1) база (эти колонки создаются как float — ок)
+    for s in STATS:
+        out[f'{s}_база'] = out[s].astype(float)
+
+    # 2) ВАЖНО: приводим сами STATS к float, иначе запись упадёт
+    for s in STATS:
+        out[s] = out[s].astype(float)
+
+    # 3) ОР тоже float — на случай, если будешь писать в него
+    out['ОР'] = out['ОР'].astype(float)
+
+    field_mask = out['позиция'] != 'Т'
+    field = out.loc[field_mask, STATS]          # уже float, astype не нужен
+
+    dom_idx = field.values.argmax(axis=1)
+    boost = np.array([prof[STATS[i]] for i in dom_idx])
+
+    eff = field.values.copy()
+    for i in range(len(STATS)):
+        m = dom_idx != i
+        eff[m, i] = field.values[m, i] * (1.0 + boost[m])
+
+    # 4) теперь запись безопасна — и колонки, и eff — float
+    out.loc[field_mask, STATS] = eff
+    out['Тренер_буст'] = 0.0
+    out.loc[field_mask, 'Тренер_буст'] = boost
+
+    # 5) ОР_эфф отдельной колонкой, базовый ОР не трогаем
+    out['ОР_эфф'] = out['ОР'].astype(float)
+    out.loc[field_mask, 'ОР_эфф'] = eff.mean(axis=1)
+
+    return out
