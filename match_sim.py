@@ -1143,9 +1143,9 @@ def simulate_match(lineup_home, coach_home,
         
         # Формируем описание гола
         if goal_type == 'головой':
-            detail = f"гол головой" + (f" (ассистент {assister_name})" if assister_name else "")
+            detail = f"гол головой"
         else:
-            detail = 'гол' if assister_name else 'индивидуальный гол'
+            detail = 'гол' if assister_name else 'инд.гол'
         
         events[idx] = {
             'minute': e['minute'],
@@ -1157,8 +1157,8 @@ def simulate_match(lineup_home, coach_home,
             'detail': detail,
         }
 
-    score['home'] = sum(1 for i in home_goal_idx)
-    score['away'] = sum(1 for i in away_goal_idx)
+    score['home'] = sum(1 for e in events if e['type'] == 'goal' and e['team'] == 'home')
+    score['away'] = sum(1 for e in events if e['type'] == 'goal' and e['team'] == 'away')
     
     abs_diff = abs(or_diff_eff)
     threshold = CONFIG['draw_threshold']
