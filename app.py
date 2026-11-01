@@ -165,15 +165,17 @@ def draw_pitch(lineup_home, lineup_away, title=''):
                                  (lineup_away, 'away', '#d13438')]:
         for x, y, pos, p in lineup_to_points(lineup, half=half):
             name = p['Имя_чистое']
-            rating = float(p.get('ОР_эфф', p['ОР']))
-            base_rating = float(p['ОР'])
-            ready = int(p['Готовность'])
             perk = M.perk_display(p['Перки'])
+            base_rating = float(p['ОР'])
+            rating = float(p.get('ОР_эфф', base_rating))
+            ready = int(p['Готовность'])
+            boost = float(p.get('Тренер_буст', 0.0))
 
             hover = (f"<b>{name}</b><br>"
                     f"Позиция: {pos}<br>"
-                    f"ОР: {base_rating:.1f} → {rating:.1f}<br>"
+                    f"ОР: {base_rating:.1f} → <b>{rating:.1f}</b><br>"
                     f"Готовность: {ready:+d}"
+                    + (f"<br>Буст тренера: +{boost*100:.1f}%" if boost > 0 else "")
                     + (f"<br>Перк: {perk}" if perk else "")
                     + "<br><br>" + _stat_line(p))
 
@@ -233,10 +235,15 @@ def lineup_to_records(lineup):
 def bench_to_records(bench):
     rows = []
     for pos, pl in bench:
+        boost = float(pl.get('Тренер_буст', 0.0))
+        base_or = float(pl['ОР'])
+        eff_or = float(pl.get('ОР_эфф', base_or))
         rows.append(dict(
             Поз=pos,
             Имя=pl['Имя_чистое'],
-            ОР=round(float(pl['ОР']), 1),
+            ОР=round(base_or, 1),
+            ОР_эфф=round(eff_or, 1),
+            Буст=f"+{boost*100:.1f}%" if boost > 0 else "—",
             Гот=int(pl['Готовность']),
             Перк=M.perk_display(pl['Перки']),
         ))
@@ -458,12 +465,22 @@ f"(реальный {exp.get('xg_home_real', 0):.2f} vs {exp.get('xg_away_real',
 
         # ---- ЗАМЕНЫ ----
         subs = [e for e in result['events']
-                if e['type'] in ('substitution', 'injury_sub')]
+        if e['type'] in ('substitution', 'injury_sub')]
         if subs:
             st.markdown('### ↔ Замены')
             for e in subs:
                 team_name = team_home if e['team'] == 'home' else team_away
-                st.markdown(f"**{e['minute']}'** — {team_name}: {e['detail']}")
+                detail = e['detail']
+                
+                # Проверяем, есть ли суперзамена на той же минуте
+                super_sub = next((s for s in result['events'] 
+                                if s['type'] == 'super_sub' 
+                                and s['minute'] == e['minute'] 
+                                and s['team'] == e['team']), None)
+                if super_sub:
+                    detail += " ⭐ СУПЕРЗАМЕНА!"
+                
+                st.markdown(f"**{e['minute']}'** — {team_name}: {detail}")
 
         # ---- ТРАВМЫ ----
         injs = [e for e in result['events']

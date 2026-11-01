@@ -493,7 +493,9 @@ def apply_coach_to_team(team: pd.DataFrame, coach) -> pd.DataFrame:
     out.loc[field_mask, 'Тренер_буст'] = boost
 
     # 5) ОР_эфф отдельной колонкой, базовый ОР не трогаем
+    # 5) ОР_эфф = среднее эффективных статов × (1 + готовность/100)
+    ready = out['Готовность'].astype(float) / 100.0
     out['ОР_эфф'] = out['ОР'].astype(float)
-    out.loc[field_mask, 'ОР_эфф'] = eff.mean(axis=1)
+    out.loc[field_mask, 'ОР_эфф'] = eff.mean(axis=1) * (1.0 + ready[field_mask])
 
     return out

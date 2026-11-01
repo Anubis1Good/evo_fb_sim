@@ -11,6 +11,7 @@
 """
 import numpy as np
 from random import random, choice, randint, shuffle
+import copy
 
 # =========================================================
 # CONFIG — ВСЕ КОЭФФИЦИЕНТЫ В ОДНОМ МЕСТЕ
@@ -36,10 +37,7 @@ CONFIG = {
     'super_motivation_mult': 1.25,
 
     # ---------- ЛЕГЕНДАРНЫЙ МАТЧ ----------
-    # Редкое событие для ОДНОЙ случайной команды: она играет на пределе
-    # возможностей (+50% к боевым статам). Команда выбирается случайно,
-    # не зависит от силы.
-    'legendary_match_chance': 0.05,   # ~1.5% (1 из ~67 матчей)
+    'legendary_match_chance': 0.05,
     'legendary_match_mult': 2.00,
 
     # ---------- НИЧЬИ ----------
@@ -92,7 +90,7 @@ PERK_MODS = {
     13: {'aura': 0.15, 'pass_': 0.05, 'shot': 0.05},
     14: {'pass_': 0.05, 'shot': 0.05, 'dribble': 0.05, 'tackle': 0.05},
     15: {'pass_': 0.10, 'dribble': 0.05},
-    16: {},
+    16: {'super_sub': 0.15},  # ← СУПЕРЗАМЕНА: +15% ко всем статам при выходе на замену
     17: {'assist': 0.10, 'pass_': 0.08},
     18: {'intercept': 0.15, 'tackle': 0.10},
     19: {'dribble': 0.10, 'pass_': 0.08, 'penalty_earn': 0.10},
@@ -126,21 +124,60 @@ def _parse_perks(v):
     return [int(x) for x in str(v).split(',') if x.strip().isdigit()]
 
 def _perk_sum(perks, key, fatigue=0):
-    ft = CONFIG['fatigue_decay_perks']
-    if fatigue >= ft:
-        mult = max(0.0, 1.0 - (fatigue - ft) / 30.0)
-    else:
-        mult = 1.0
+    """Сумма перков по ключу. УСТАЛОСТЬ НЕ УЧИТЫВАЕТСЯ."""
     total = 0.0
     for p in perks:
         total += PERK_MODS.get(p, {}).get(key, 0.0)
-    return total * mult
+    return total
+
+def _is_super_sub(perks):
+    """Проверяет, есть ли перк суперзамены (16)"""
+    return 16 in perks
+
+def _super_sub_bonus(perks):
+    """Возвращает бонус суперзамены (0.25 = +25%)"""
+    return PERK_MODS.get(16, {}).get('super_sub', 0.0)
 
 def _fatigue_mult(fatigue):
     return float(np.clip(1.0 - (fatigue / 100.0) ** 1.3, 0.55, 1.0))
 
+def _ready_mult(player):
+    """Множитель готовности: 1.0 + Готовность/100"""
+    return 1.0 + float(player.get('Готовность', 0)) / 100.0
+
+def _get_player_effective_mult(player, fatigue_map):
+    """
+    Возвращает множитель для игрока:
+    - готовность
+    - усталость (базовые статы)
+    - суперзамена (если игрок вышел на замену и имеет перк 16)
+    """
+    name = player['Имя_чистое']
+    f = fatigue_map.get(name, 0)
+    
+    # Базовый множитель: готовность × усталость
+    mult = _ready_mult(player) * _fatigue_mult(f)
+    
+    # Суперзамена: если игрок вышел на замену (усталость = 0 или очень мала)
+    # и у него есть перк 16
+    perks = _parse_perks(player.get('Перки'))
+    if _is_super_sub(perks) and f <= 5.0:  # только если свежий
+        mult *= (1.0 + _super_sub_bonus(perks))
+    
+    return mult
+
 def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
+
+def _team_avg_stat(lineup, stat):
+    """Средний стат по полевым игрокам команды"""
+    vals = []
+    for pos, plist in lineup.items():
+        if pos == 'В':
+            continue
+        for p in plist:
+            vals.append(float(p[stat]))
+    return float(np.mean(vals)) if vals else 50.0
 
 # =========================================================
 # СИЛА КОМАНДЫ
@@ -168,7 +205,9 @@ def team_strength(lineup, coach, aura_opp=0.0, fatigue_map=None, home_bonus_mult
         for pos, p in players:
             f = fatigue_map.get(p['Имя_чистое'], 0)
             perks = _parse_perks(p.get('Перки'))
-            v = float(p[stat]) * _fatigue_mult(f)
+            
+            # Используем новый множитель
+            v = float(p[stat]) * _get_player_effective_mult(p, fatigue_map)
             v *= (1 + _perk_sum(perks, 'aura', f) * 0.5)
             vals.append(v)
         return float(np.mean(vals)) if vals else 50.0
@@ -221,6 +260,7 @@ def team_strength(lineup, coach, aura_opp=0.0, fatigue_map=None, home_bonus_mult
         'aura_mult': aura_mult,
         'coach_perks': coach_perks,
         'coach_stats': coach_stats,
+        'tactics_mid': line_avg(midfielders, 'Тактика') * aura_mult * hb,
     }
 
 # =========================================================
@@ -272,6 +312,13 @@ def simulate_match(lineup_home, coach_home,
                    max_substitutions=None):
     if seed_val is not None:
         np.random.seed(seed_val)
+
+    # ▼▼▼ ВАЖНО: делаем глубокие копии, чтобы не мутировать оригиналы ▼▼▼
+    lineup_home = copy.deepcopy(lineup_home)
+    lineup_away = copy.deepcopy(lineup_away)
+    bench_home = copy.deepcopy(bench_home) if bench_home else []
+    bench_away = copy.deepcopy(bench_away) if bench_away else []
+    # ▲▲▲ КОНЕЦ ИСПРАВЛЕНИЯ ▲▲▲
 
     n_episodes_per_block = n_episodes_per_block or CONFIG['default_n_episodes_per_block']
     if home_adv_on is None:
@@ -344,8 +391,10 @@ def simulate_match(lineup_home, coach_home,
                                home_bonus_mult=away_strength_total)
 
     # ---- предварительная оценка владения ----
-    mid_home_avg = (0.40 * S_home_pre['pass_mid'] + 0.60 * OR_home) * home_strength_total
-    mid_away_avg = (0.40 * S_away_pre['pass_mid'] + 0.60 * OR_away) * away_strength_total
+    mid_home_avg = (0.30 * S_home_pre['pass_mid']
+                    + 0.10 * S_home_pre['tactics_mid']
+                    + 0.60 * OR_home) * home_strength_total
+    mid_away_avg = (0.30 * S_away_pre['pass_mid'] + 0.10 * S_away_pre['tactics_mid'] + 0.60 * OR_away) * away_strength_total
     diff_avg = mid_home_avg - mid_away_avg
     p_raw_avg = _sigmoid(diff_avg / CONFIG['possession_scale'])
     p_home_poss_avg = 0.50 + 0.55 * (p_raw_avg - 0.5)
@@ -439,14 +488,22 @@ def simulate_match(lineup_home, coach_home,
         scored.sort(key=lambda x: -x[0])
         return scored[0][1]
 
+    def find_player(lineup, name):
+        """Найти игрока по имени"""
+        for pos, plist in lineup.items():
+            for p in plist:
+                if p['Имя_чистое'] == name:
+                    return p
+        return None
+
     # ===================================================
     # ВЕРОЯТНОСТНЫЕ ФУНКЦИИ
     # ===================================================
     def p_goal_from_shot(att, dfd, gk, home_bonus=0.0):
-        a = float(att['Удар']) * _fatigue_mult(fatigue.get(att['Имя_чистое'], 0))
-        d = (float(dfd['Отбор']) * _fatigue_mult(fatigue.get(dfd['Имя_чистое'], 0))
+        a = float(att['Удар']) * _fatigue_mult(fatigue.get(att['Имя_чистое'], 0)) * _ready_mult(att)
+        d = (float(dfd['Отбор']) * _fatigue_mult(fatigue.get(dfd['Имя_чистое'], 0)) * _ready_mult(dfd)
              if dfd is not None else 50.0)
-        g = float(gk['ОР']) if gk is not None else 50.0
+        g = float(gk['ОР']) * _ready_mult(gk) if gk is not None else 50.0
         base = 0.10 + 0.10 * _sigmoid((a - d) / 30) - 0.03 * _sigmoid((g - a) / 35)
         perks = _parse_perks(att.get('Перки'))
         f = fatigue.get(att['Имя_чистое'], 0)
@@ -458,32 +515,76 @@ def simulate_match(lineup_home, coach_home,
         base += home_bonus
         return float(np.clip(base, 0.02, 0.60))
 
-    def p_dribble(att, dfd):
-        a = float(att['Скорость']) * _fatigue_mult(fatigue.get(att['Имя_чистое'], 0))
-        d = (float(dfd['Отбор']) * _fatigue_mult(fatigue.get(dfd['Имя_чистое'], 0))
-             if dfd is not None else 50.0)
+    def p_dribble(att, dfd, S_def):
+        a = float(att['Скорость']) * _get_player_effective_mult(att, fatigue)
+        d = (float(dfd['Отбор']) * _get_player_effective_mult(dfd, fatigue)
+            if dfd is not None else 50.0)
         perks = _parse_perks(att.get('Перки'))
         f = fatigue.get(att['Имя_чистое'], 0)
         base = 0.45 + 0.25 * _sigmoid((a - d) / 22)
         base *= (1 + _perk_sum(perks, 'dribble', f))
+        
+        # speed перк
+        speed_perk = _perk_sum(perks, 'speed', f)
+        a *= (1 + speed_perk)
+        
+        # variance перк
+        var = _perk_sum(perks, 'variance', f)
+        if var > 0:
+            sign = 1 if random() < 0.5 else -1
+            base *= (1 + sign * var * random())
+        
+        # Тактика атакующего
+        att_tac = float(att['Тактика']) * _ready_mult(att)
+        base *= (1 + 0.05 * _sigmoid((att_tac - 70) / 20))
+        
         if dfd is not None:
             dperks = _parse_perks(dfd.get('Перки'))
             df_f = fatigue.get(dfd['Имя_чистое'], 0)
             base *= (1 - min(0.35, _perk_sum(dperks, 'tackle', df_f)))
+            
+            # offside_trap защитника
+            trap = _perk_sum(dperks, 'offside_trap', df_f)
+            base *= (1 - min(0.15, trap))
+        
+        # tackle_def команды
+        def_tackle = S_def['tackle_def'] / 100.0
+        base *= (1 - 0.10 * (def_tackle - 0.7))
+        
         return float(np.clip(base, 0.10, 0.82))
 
-    def p_pass(mid, opp_mid):
-        a = float(mid['Пас']) * _fatigue_mult(fatigue.get(mid['Имя_чистое'], 0))
-        d = (float(opp_mid['Отбор']) * _fatigue_mult(fatigue.get(opp_mid['Имя_чистое'], 0))
-             if opp_mid is not None else 50.0)
+    def p_pass(mid, opp_mid, S_att, S_def):
+        # Используем _get_player_effective_mult
+        a = float(mid['Пас']) * _get_player_effective_mult(mid, fatigue)
+        d = (float(opp_mid['Отбор']) * _get_player_effective_mult(opp_mid, fatigue)
+            if opp_mid is not None else 50.0)
+        
         perks = _parse_perks(mid.get('Перки'))
         f = fatigue.get(mid['Имя_чистое'], 0)
         base = 0.65 + 0.20 * _sigmoid((a - d) / 25)
         base *= (1 + _perk_sum(perks, 'pass_', f))
+        
+        # Тактика пасующего
+        mid_tac = float(mid['Тактика']) * _get_player_effective_mult(mid, fatigue)
+        base *= (1 + 0.05 * _sigmoid((mid_tac - 70) / 20))
+        
         if opp_mid is not None:
             dperks = _parse_perks(opp_mid.get('Перки'))
             df_f = fatigue.get(opp_mid['Имя_чистое'], 0)
             base *= (1 - min(0.30, _perk_sum(dperks, 'intercept', df_f)))
+            
+            # clearance защитника
+            clear = _perk_sum(dperks, 'clearance', df_f)
+            base *= (1 - min(0.20, clear))
+        
+        # air_adv (опционально)
+        air_adv = (S_att['air_att'] - S_def['air_def']) / 100.0
+        base *= (1 + 0.10 * np.tanh(air_adv))
+        
+        # tackle_mid команды
+        opp_tackle = S_def['tackle_mid'] / 100.0
+        base *= (1 - 0.10 * (opp_tackle - 0.7))
+        
         return float(np.clip(base, 0.28, 0.92))
 
     def reduce_strength(side):
@@ -502,8 +603,17 @@ def simulate_match(lineup_home, coach_home,
             return None
         cands.sort(key=lambda x: -x[2])
         return cands[0]
-
+    
+    def is_on_pitch(lineup, player_name):
+        """Проверяет, есть ли игрок уже на поле"""
+        for pos, plist in lineup.items():
+            for p in plist:
+                if p['Имя_чистое'] == player_name:
+                    return True
+        return False
+    
     def do_replacement(lineup, side, pos_out, player_out, player_in, bench, reason, minute):
+        # 1. Заменяем в составе
         new_list = []
         replaced = False
         for p in lineup.get(pos_out, []):
@@ -512,14 +622,25 @@ def simulate_match(lineup_home, coach_home,
                 replaced = True
             else:
                 new_list.append(p)
-        lineup[pos_out] = new_list
+        
+        # Защита от сбоев: если не нашли игрока для замены, просто добавляем нового
+        if not replaced:
+            lineup.setdefault(pos_out, []).append(player_in)
+        else:
+            lineup[pos_out] = new_list
+
+        # 2. ЖЁСТКО удаляем вошедшего игрока из списка запасных
+        # Использование среза [:] гарантирует изменение оригинального списка
+        bench[:] = [(pos, pl) for pos, pl in bench if pl['Имя_чистое'] != player_in['Имя_чистое']]
+
+        # 3. Сбрасываем усталость вошедшего
         fatigue[player_in['Имя_чистое']] = 0.0
-        for i, (pos_in, pl_in) in enumerate(bench):
-            if pl_in['Имя_чистое'] == player_in['Имя_чистое']:
-                bench.pop(i)
-                break
+        
+        # 4. Учет статистики
         subs_made[side] += 1
         stats[side]['subs'] += 1
+        
+        # 5. Событие обычной замены
         events.append({
             'minute': minute,
             'type': 'substitution' if reason == 'tactical' else 'injury_sub',
@@ -529,6 +650,17 @@ def simulate_match(lineup_home, coach_home,
             'detail': (f"↔ {player_out['Имя_чистое']} → {player_in['Имя_чистое']}"
                        + (' (травма)' if reason == 'injury' else '')),
         })
+        
+        # 6. Событие суперзамены (если есть перк 16)
+        perks_in = _parse_perks(player_in.get('Перки'))
+        if _is_super_sub(perks_in):
+            events.append({
+                'minute': minute,
+                'type': 'super_sub',
+                'team': side,
+                'player': player_in['Имя_чистое'],
+                'detail': f"⭐ {player_in['Имя_чистое']} выходит на замену с бонусом +25%!"
+            })
 
     def remove_player(lineup, side, pos_out, player_out, minute, reason):
         new_list = [p for p in lineup.get(pos_out, [])
@@ -546,29 +678,40 @@ def simulate_match(lineup_home, coach_home,
     def try_tactical_substitution(lineup, side, minute, bench):
         if subs_made[side] >= max_substitutions:
             return
-        if not bench:
+        
+        # Создаем список доступных запасных, которых НЕТ на поле
+        available_subs = [
+            (i, pos_in, pl_in) for i, (pos_in, pl_in) in enumerate(bench) 
+            if not is_on_pitch(lineup, pl_in['Имя_чистое'])
+        ]
+        
+        if not available_subs:
             return
+            
         if minute < 55 or random() > 0.55:
             return
+            
         target = find_fatigued(lineup, ('ЦН', 'ОФ', 'АПЗ', 'ЛПЗ', 'ППЗ', 'ЦПЗ', 'ОПЗ'))
         if target is None:
             target = find_fatigued(lineup, ('ЦЗ', 'ЛЗ', 'ПЗ'))
         if target is None:
             return
+            
         pos_out, player_out, fat_out = target
+        
         replacement = None
-        for i, (pos_in, player_in) in enumerate(bench):
-            if player_in['Имя_чистое'] == player_out['Имя_чистое']:
-                continue
+        for i, pos_in, player_in in available_subs:
             if pos_in == pos_out or player_in.get('спец1') == pos_out:
                 replacement = (i, player_in)
                 break
+                
         if replacement is None:
-            best_i = max(range(len(bench)), key=lambda i: float(bench[i][1]['ОР']))
-            replacement = (best_i, bench[best_i][1])
+            # Если нет игрока на ту же позицию, берем самого сильного из доступных
+            best_i, best_pos, best_player = max(available_subs, key=lambda x: float(x[2]['ОР']))
+            replacement = (best_i, best_player)
+            
         _, player_in = replacement
-        do_replacement(lineup, side, pos_out, player_out, player_in,
-                       bench, 'tactical', minute)
+        do_replacement(lineup, side, pos_out, player_out, player_in, bench, 'tactical', minute)
 
     def try_injury(lineup, side, minute, bench):
         if random() > CONFIG['injury_chance']:
@@ -580,6 +723,7 @@ def simulate_match(lineup_home, coach_home,
                     field.append((pos, p))
         if not field:
             return
+            
         weights = [1.0 + fatigue.get(p['Имя_чистое'], 0) / 50.0 for _, p in field]
         total_w = sum(weights)
         r = random() * total_w
@@ -592,18 +736,31 @@ def simulate_match(lineup_home, coach_home,
                 break
         pos_out, player_out = chosen
         stats[side]['injuries'] += 1
+        
         if subs_made[side] < max_substitutions and bench:
+            # Доступные запасные (которых нет на поле)
+            available_subs = [
+                (i, pos_in, pl_in) for i, (pos_in, pl_in) in enumerate(bench) 
+                if not is_on_pitch(lineup, pl_in['Имя_чистое'])
+            ]
+            
+            if not available_subs:
+                remove_player(lineup, side, pos_out, player_out, minute, 'injury')
+                red_cards[side] += 1
+                return
+
             replacement = None
-            for i, (pos_in, pl_in) in enumerate(bench):
+            for i, pos_in, pl_in in available_subs:
                 if pos_in == pos_out or pl_in.get('спец1') == pos_out:
                     replacement = (i, pl_in)
                     break
+                    
             if replacement is None:
-                best_i = max(range(len(bench)), key=lambda i: float(bench[i][1]['ОР']))
-                replacement = (best_i, bench[best_i][1])
+                best_i, best_pos, best_player = max(available_subs, key=lambda x: float(x[2]['ОР']))
+                replacement = (best_i, best_player)
+                
             _, player_in = replacement
-            do_replacement(lineup, side, pos_out, player_out, player_in,
-                           bench, 'injury', minute)
+            do_replacement(lineup, side, pos_out, player_out, player_in, bench, 'injury', minute)
         else:
             remove_player(lineup, side, pos_out, player_out, minute, 'injury')
             red_cards[side] += 1
@@ -627,11 +784,7 @@ def simulate_match(lineup_home, coach_home,
                         fatigue.get(name, 0) + _fatigue_growth(p, opp_ratio, m_end, pos)
                     )
 
-        # if m_start >= 46:
-        #     sub_minute = randint(m_start, m_end)
-        #     try_tactical_substitution(lineup_home, 'home', sub_minute, bench_home)
-        #     try_tactical_substitution(lineup_away, 'away', sub_minute, bench_away)
-        if m_end >= 55:                      # а не m_start >= 46
+        if m_end >= 55:
             n_attempts = 2 if m_end < 75 else 3
             for _ in range(n_attempts):
                 sub_minute = randint(max(55, m_start), m_end)
@@ -684,7 +837,7 @@ def simulate_match(lineup_home, coach_home,
             opp_mid = pick_midfielder(lineup_def)
             if mid is None:
                 continue
-            pass_ok = random() < p_pass(mid, opp_mid) * red_mult_att
+            pass_ok = random() < p_pass(mid, opp_mid, S_att, S_def) * red_mult_att
 
             if not pass_ok:
                 if opp_mid is not None and random() < 0.18:
@@ -699,14 +852,29 @@ def simulate_match(lineup_home, coach_home,
             if att is None:
                 continue
             dfd = pick_defender(lineup_def)
-            dribble_ok = random() < p_dribble(att, dfd) * red_mult_att
+            dribble_ok = random() < p_dribble(att, dfd, S_def) * red_mult_att
 
             if not dribble_ok:
                 if dfd is not None and random() < 0.30:
                     stats['away' if home_side else 'home']['fouls'] += 1
                     dfd_perks = _parse_perks(dfd.get('Перки'))
                     df_f = fatigue.get(dfd['Имя_чистое'], 0)
+                    
+                    # card_receive перк
                     card_risk = CONFIG['yellow_from_foul'] + _perk_sum(dfd_perks, 'card', df_f)
+                    card_risk -= _perk_sum(dfd_perks, 'card_receive', df_f)
+                    
+                    # penalty_earn перк атакующего
+                    att_perks = _parse_perks(att.get('Перки'))
+                    att_f = fatigue.get(att['Имя_чистое'], 0)
+                    pen_chance = CONFIG['penalty_from_foul']
+                    pen_chance += _perk_sum(att_perks, 'penalty_earn', att_f)
+                    
+                    # Тактика защитника
+                    dfd_tac = float(dfd['Тактика']) * _ready_mult(dfd)
+                    card_risk *= (1 - 0.20 * _sigmoid((dfd_tac - 70) / 20))
+                    red_risk = CONFIG['red_from_foul'] + _perk_sum(dfd_perks, 'card', df_f) / 3
+                    red_risk *= (1 - 0.20 * _sigmoid((dfd_tac - 70) / 20))
 
                     if random() < card_risk:
                         stats['away' if home_side else 'home']['yellow'] += 1
@@ -716,7 +884,7 @@ def simulate_match(lineup_home, coach_home,
                             'player': dfd['Имя_чистое'],
                             'detail': f"ЖК — {dfd['Имя_чистое']}"
                         })
-                    if random() < CONFIG['red_from_foul'] + _perk_sum(dfd_perks, 'card', df_f) / 3:
+                    if random() < red_risk:
                         stats['away' if home_side else 'home']['red'] += 1
                         red_cards['away' if home_side else 'home'] += 1
                         events.append({
@@ -726,7 +894,7 @@ def simulate_match(lineup_home, coach_home,
                             'detail': f"КК — {dfd['Имя_чистое']}"
                         })
 
-                    if random() < CONFIG['penalty_from_foul']:
+                    if random() < pen_chance:
                         pen_team = side
                         stats[pen_team]['penalties'] += 1
                         pen_taker = att
@@ -736,30 +904,20 @@ def simulate_match(lineup_home, coach_home,
                             gk_perks = _parse_perks(gk.get('Перки'))
                             gk_f = fatigue.get(gk['Имя_чистое'], 0)
                             p_pen *= (1 - min(0.30, _perk_sum(gk_perks, 'save', gk_f)))
-                        if random() < p_pen and goals_left_home + goals_left_away > 0:
-                            if (home_side and goals_left_home > 0) or ((not home_side) and goals_left_away > 0):
-                                score[pen_team] += 1
-                                if home_side:
-                                    goals_left_home -= 1
-                                else:
-                                    goals_left_away -= 1
-                                stats[pen_team]['on_target'] += 1
-                                stats[pen_team]['goals_from_pen'] += 1
-                                events.append({
-                                    'minute': minute, 'type': 'goal',
-                                    'team': pen_team,
-                                    'scorer': pen_taker['Имя_чистое'],
-                                    'assister': None,
-                                    'detail': 'с пенальти'
-                                })
-                                continue
-                            else:
-                                events.append({
-                                    'minute': minute, 'type': 'penalty_miss',
-                                    'team': pen_team,
-                                    'player': pen_taker['Имя_чистое'],
-                                    'detail': f"{pen_taker['Имя_чистое']} не забил пенальти"
-                                })
+                        
+                        # ИСПРАВЛЕНО: убираем проверку goals_left
+                        if random() < p_pen:
+                            score[pen_team] += 1
+                            stats[pen_team]['on_target'] += 1
+                            stats[pen_team]['goals_from_pen'] += 1
+                            events.append({
+                                'minute': minute, 'type': 'goal',
+                                'team': pen_team,
+                                'scorer': pen_taker['Имя_чистое'],
+                                'assister': None,
+                                'goal_type': 'пенальти',
+                                'detail': 'с пенальти'
+                            })
                         else:
                             events.append({
                                 'minute': minute, 'type': 'penalty_miss',
@@ -772,11 +930,11 @@ def simulate_match(lineup_home, coach_home,
                         stats[fk_team]['free_kicks'] += 1
                         fk_shooter = max(
                             [p for pos, plist in lineup_att.items() for p in plist],
-                            key=lambda p: float(p['Удар']) * _fatigue_mult(fatigue.get(p['Имя_чистое'], 0)),
+                            key=lambda p: float(p['Удар']) * _fatigue_mult(fatigue.get(p['Имя_чистое'], 0)) * _ready_mult(p),
                             default=att
                         )
                         p_fk = CONFIG['fk_goal_base'] + CONFIG['fk_goal_slope'] * _sigmoid(
-                            (float(fk_shooter['Удар']) - 70) / 25)
+                            (float(fk_shooter['Удар']) * _ready_mult(fk_shooter) - 70) / 25)
                         if random() < p_fk:
                             if (home_side and goals_left_home > 0) or ((not home_side) and goals_left_away > 0):
                                 score[fk_team] += 1
@@ -795,38 +953,79 @@ def simulate_match(lineup_home, coach_home,
                                 })
                 continue
 
-            # -------- УДАР (только считаем, голы разыграем в конце) --------
+            # -------- УДАР --------
             stats[side]['shots'] += 1
             gk = pick_gk(lineup_def)
             gk_name = gk['Имя_чистое'] if gk is not None else 'вратарь'
 
-            # Разделяем удары на три типа для статистики и последующей
-            # реализации голов. Сама реализация — в конце матча.
-            # Точность удара зависит от Удара игрока против ОР вратаря
-            att_shot = float(att['Удар']) * _fatigue_mult(fatigue.get(att['Имя_чистое'], 0))
-            gk_rating = float(gk['ОР']) if gk is not None else 50.0
-            # вероятность попасть в створ ~ от Удара
-            p_on_target = 0.35 + 0.35 * _sigmoid((att_shot - 60) / 20)
-            p_on_target = float(np.clip(p_on_target, 0.20, 0.75))
+            att_perks = _parse_perks(att.get('Перки'))
+            att_f = fatigue.get(att['Имя_чистое'], 0)
+            
+            # В блоке УДАР, перед расчётом p_on_target:
+            att_shot = float(att['Удар']) * _get_player_effective_mult(att, fatigue)
+            att_shot *= (1 + _perk_sum(att_perks, 'shot', att_f))
+
+            gk_rating = float(gk['ОР']) * _get_player_effective_mult(gk, fatigue) if gk is not None else 50.0
+
+            # ДУЭЛЬ: Удар бьющего vs ОР вратаря
+            # Чем больше разница (att_shot - gk_rating), тем легче попасть в створ
+            # att_shot=70, gk=60 → +0.10 к точности (бьющий сильнее)
+            # att_shot=70, gk=70 → нейтрально
+            # att_shot=70, gk=90 → -0.10 к точности (вратарь сильнее)
+            p_on_target = 0.35 + 0.20 * _sigmoid((att_shot - 60) / 25)
+
+            gk_diff = (att_shot - gk_rating) / 100.0
+            p_on_target += 0.06 * gk_diff
+
+            p_on_target = float(np.clip(p_on_target, 0.20, 0.60))
+
+            range_perk = _perk_sum(att_perks, 'range', att_f)
+            is_long_shot = False
+            if range_perk > 0 and random() < 0.30:
+                is_long_shot = True
+                att_shot *= 0.85
+                att_shot *= (1 + range_perk * 0.5)
+            
+            var = _perk_sum(att_perks, 'variance', att_f)
+            if var > 0:
+                sign = 1 if random() < 0.5 else -1
+                p_on_target *= (1 + sign * var * random())
 
             roll = random()
             if roll < p_on_target:
                 # в створ
                 stats[side]['on_target'] += 1
+                
+                xg_shot = att_shot / 100.0
+                xg_shot = float(np.clip(xg_shot, 0.40, 0.95))
+                
                 events.append({
                     'minute': minute, 'type': 'shot_on',
                     'team': side,
                     'shooter': att['Имя_чистое'],
-                    'xg_shot': att_shot / 100.0,   # 0.5..0.9 примерно
+                    'xg_shot': xg_shot,
+                    'goal_perk': _perk_sum(att_perks, 'goal', att_f),
+                    'shot_perk': _perk_sum(att_perks, 'shot', att_f),
+                    'range_perk': range_perk,
+                    'variance_perk': var,
+                    'rebound': _perk_sum(att_perks, 'rebound', att_f),
+                    'is_long_shot': is_long_shot,
                     'detail': f"{att['Имя_чистое']} бьёт в створ ({gk_name})"
                 })
-            elif roll < p_on_target + 0.35:
+            elif roll < p_on_target + 0.25:
                 # угловой
                 stats[side]['corners'] += 1
                 events.append({
                     'minute': minute, 'type': 'corner',
                     'team': side,
                     'detail': 'угловой'
+                })
+            elif roll < p_on_target + 0.25 + 0.15:
+                # НОВЫЙ ТИП: навес с игры (шанс гола головой)
+                events.append({
+                    'minute': minute, 'type': 'cross',
+                    'team': side,
+                    'detail': 'навес с игры'
                 })
             else:
                 # мимо
@@ -839,35 +1038,77 @@ def simulate_match(lineup_home, coach_home,
     # =====================================================
     # РЕАЛИЗАЦИЯ ГОЛОВ
     # =====================================================
-    # Для каждого удара в створ считаем вероятность гола от xg_shot и вратаря.
-    # Углы считаем отдельно.
-
     def compute_goal_events(side):
+        lineup_att = lineup_home if side == 'home' else lineup_away
         lineup_def = lineup_away if side == 'home' else lineup_home
         gk = pick_gk(lineup_def)
-        gk_rating = float(gk['ОР']) if gk is not None else 50.0
+        gk_rating = float(gk['ОР']) * _get_player_effective_mult(gk, fatigue) if gk is not None else 50.0
         gk_perks = _parse_perks(gk.get('Перки')) if gk is not None else []
-        gk_save = _perk_sum(gk_perks, 'save')
+        gk_f = fatigue.get(gk['Имя_чистое'], 0) if gk is not None else 0
+        gk_save = _perk_sum(gk_perks, 'save', gk_f)
+
+        # Лучший ассистент команды
+        best_assist = max(
+            [p for pos, plist in lineup_att.items() for p in plist
+             if pos in ('ЦН', 'ОФ', 'АПЗ', 'ЛПЗ', 'ППЗ', 'ЦПЗ')],
+            key=lambda p: _perk_sum(_parse_perks(p.get('Перки')), 'assist', 0),
+            default=None,
+        )
+        assist_bonus = (_perk_sum(_parse_perks(best_assist.get('Перки')), 'assist', 0) * 0.3
+                        if best_assist is not None else 0.0)
 
         goal_events = []
         for i, e in enumerate(events):
             if e['team'] != side:
                 continue
+            
             if e['type'] == 'shot_on':
-                # базовое качество удара
                 xg_shot = e.get('xg_shot', 0.6)
-                # 10% + 15% × (xg_shot - 0.5) + бонус от силы игрока
-                base = 0.10 + 0.30 * (xg_shot - 0.5)
+                base = 0.08 + 0.15 * (xg_shot - 0.5)
+                
                 # штраф от вратаря
                 base *= (1 - min(0.30, gk_save))
-                base *= (1 - min(0.20, (gk_rating - 70) / 100) if gk_rating > 70 else 1.0)
-                base = float(np.clip(base, 0.03, 0.45))
+                att_shot = xg_shot * 100.0
+                gk_diff = (att_shot - gk_rating) / 100.0
+                att_shot = xg_shot * 100.0
+                gk_diff = (att_shot - gk_rating) / 100.0
+                base *= (1 + 0.15 * gk_diff)   # было 0.30
+
+                base = float(np.clip(base, 0.02, 0.25))
+                
+                # goal перк бьющего
+                goal_perk = e.get('goal_perk', 0)
+                base *= (1 + goal_perk)
+                
+                # rebound перк
+                rebound_perk = e.get('rebound', 0)
+                if rebound_perk > 0 and random() < 0.15 + rebound_perk:
+                    base *= 1.3
+                
+                # assist бонус
+                base *= (1 + assist_bonus)
+                
+                base = float(np.clip(base, 0.05, 0.55))
                 if random() < base:
                     goal_events.append(i)
+            
+            # Угловые и навесы — уменьшаем вероятности:
             elif e['type'] == 'corner':
-                # угловой: ~4% гол
-                if random() < 0.04:
+                att_air = _team_avg_stat(lineup_att, 'Верх')
+                def_air = _team_avg_stat(lineup_def, 'Верх')
+                p_corner = 0.04 * (1 + (att_air - def_air) / 200.0)  # было 0.08
+                p_corner = float(np.clip(p_corner, 0.02, 0.14))       # было 0.03-0.18
+                if random() < p_corner:
                     goal_events.append(i)
+
+            elif e['type'] == 'cross':
+                att_air = _team_avg_stat(lineup_att, 'Верх')
+                def_air = _team_avg_stat(lineup_def, 'Верх')
+                p_header = 0.03 * (1 + (att_air - def_air) / 250.0)  # было 0.05
+                p_header = float(np.clip(p_header, 0.01, 0.10))       # было 0.02-0.12
+                if random() < p_header:
+                    goal_events.append(i)
+        
         return goal_events
 
     home_goal_idx = compute_goal_events('home')
@@ -877,35 +1118,48 @@ def simulate_match(lineup_home, coach_home,
         e = events[idx]
         side = e['team']
         lineup_att = lineup_home if side == 'home' else lineup_away
+        
+        # Определяем тип гола
+        goal_type = 'обычный'
+        if e['type'] in ('corner', 'cross'):
+            goal_type = 'головой'
+        
         if e['type'] == 'shot_on':
             scorer_name = e['shooter']
         else:
+            # угловой или навес — автор по Верху
             tall_cands = sorted(
                 [p for pos, plist in lineup_att.items()
                  for p in plist if pos in ('ЦЗ', 'ЦН', 'ОФ', 'ОПЗ')],
-                key=lambda p: -float(p['Верх'])
+                key=lambda p: -float(p['Верх']) * _get_player_effective_mult(p, fatigue)
             )
             scorer_name = tall_cands[0]['Имя_чистое'] if tall_cands else 'игрок'
+        
         assister_name = None
         if random() < CONFIG['assist_chance']:
             assister = pick_assist(lineup_att, scorer_name)
             if assister is not None:
                 assister_name = assister['Имя_чистое']
+        
+        # Формируем описание гола
+        if goal_type == 'головой':
+            detail = f"гол головой" + (f" (ассистент {assister_name})" if assister_name else "")
+        else:
+            detail = 'гол' if assister_name else 'индивидуальный гол'
+        
         events[idx] = {
             'minute': e['minute'],
             'type': 'goal',
             'team': side,
             'scorer': scorer_name,
             'assister': assister_name,
-            'detail': 'гол' if assister_name else 'индивидуальный гол',
+            'goal_type': goal_type,  # НОВОЕ ПОЛЕ: 'обычный' или 'головой'
+            'detail': detail,
         }
 
     score['home'] = sum(1 for i in home_goal_idx)
     score['away'] = sum(1 for i in away_goal_idx)
-    # target_home_goals / target_away_goals оставляем такими, какими
-    # их разыграл Пуассон — они показывают "ожидаемый" счёт, а не итоговый.
-    # Обновляем статистику голов с пенальти/штрафных/угловых
-    # (они уже были добавлены в events при эпизодах — оставим как есть)
+    
     abs_diff = abs(or_diff_eff)
     threshold = CONFIG['draw_threshold']
     draw_max = CONFIG['draw_max_chance']
@@ -974,7 +1228,7 @@ def simulate_match(lineup_home, coach_home,
             'home_strength_mult': home_strength_mult,
             'away_strength_mult': away_strength_total,
             'home_or_bonus': home_or_bonus,
-            'xg_home': xg_home,              # теоретический xG (для инфо)
+            'xg_home': xg_home,
             'xg_away': xg_away,
             'target_home_goals': target_home_goals,
             'target_away_goals': target_away_goals,
@@ -1008,7 +1262,7 @@ def simulate_penalty_shootout(lineup_home, coach_home,
         for pos in ('ЦН', 'ОФ', 'АПЗ', 'ЛПЗ', 'ППЗ', 'ЦПЗ', 'ОПЗ'):
             for p in lineup.get(pos, []):
                 cands.append(p)
-        cands.sort(key=lambda p: -(float(p['Удар']) + float(p['Тактика'])
+        cands.sort(key=lambda p: -(float(p['Удар']) * _ready_mult(p) + float(p['Тактика']) * _ready_mult(p)
                                    + float(p['Аура']) * 0.5))
         return cands
 
@@ -1021,12 +1275,13 @@ def simulate_penalty_shootout(lineup_home, coach_home,
     gk_away = gk_away_l[0] if gk_away_l else None
 
     def p_score(shooter, gk):
-        sh = float(shooter['Удар'])
-        tactics = float(shooter['Тактика'])
+        sh = float(shooter['Удар']) * _ready_mult(shooter)
+        tactics = float(shooter['Тактика']) * _ready_mult(shooter)
         if gk is not None:
-            g = float(gk['ОР'])
+            g = float(gk['ОР']) * _ready_mult(gk)
             gk_perks = _parse_perks(gk.get('Перки'))
-            save_bonus = _perk_sum(gk_perks, 'save')
+            gk_f = 0  # в пенальти усталость не учитываем
+            save_bonus = _perk_sum(gk_perks, 'save', gk_f)
         else:
             g = 50.0
             save_bonus = 0.0
