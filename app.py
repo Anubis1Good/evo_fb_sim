@@ -46,9 +46,9 @@ def cached_build_team(kind, name, readiness_hash):
     coach = coaches.sort_values('ОР', ascending=False).iloc[0] if len(coaches) else None
     field = team_full[team_full['позиция'] != 'Т'].copy()
 
+    field = M.augment_with_phantoms(field, max_total=22, penalty=0.5)
     field = M.apply_coach_to_team(field, coach)
     # Добиваем только полевых (тренера уже выделили)
-    field = M.augment_with_phantoms(field, max_total=22, penalty=50.0)
 
     schemas = get_schemas()
     schema_name, _ = M.pick_best_schema(field, schemas)

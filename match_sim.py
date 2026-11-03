@@ -1171,24 +1171,55 @@ def simulate_match(lineup_home, coach_home,
         p_draw = draw_min + (draw_max - draw_min) * t
         if random() < p_draw:
             m = min(score['home'], score['away'])
-            removed_home = score['home'] - m
-            removed_away = score['away'] - m
-
-            goals_home_idx = [i for i, e in enumerate(events)
+            
+            # Сколько голов нужно добавить каждой команде
+            add_home = m - score['home']
+            add_away = m - score['away']
+            
+            # Дорисовываем голы ТОЛЬКО после 75-й минуты (когда все замены сделаны)
+            for team_side, count in [('home', add_home), ('away', add_away)]:
+                lineup_att = lineup_home if team_side == 'home' else lineup_away
+                for _ in range(count):
+                    minute = randint(75, 90)  # ← ИСПРАВЛЕНО: только поздние голы
+                    att = pick_attacker(lineup_att)
+                    scorer_name = att['Имя_чистое'] if att is not None else 'игрок'
+                    
+                    assister_name = None
+                    if random() < CONFIG['assist_chance']:
+                        assister = pick_assist(lineup_att, scorer_name)
+                        if assister is not None:
+                            assister_name = assister['Имя_чистое']
+                            
+                    detail = 'гол' if assister_name else 'индивидуальный гол'
+                    
+                    events.append({
+                        'minute': minute,
+                        'type': 'goal',
+                        'team': team_side,
+                        'scorer': scorer_name,
+                        'assister': assister_name,
+                        'goal_type': 'обычный',
+                        'detail': detail,
+                    })
+            
+            # Удаляем лишние голы
+            goals_home_idx = [i for i, e in enumerate(events) 
                               if e['type'] == 'goal' and e['team'] == 'home']
-            goals_away_idx = [i for i, e in enumerate(events)
+            goals_away_idx = [i for i, e in enumerate(events) 
                               if e['type'] == 'goal' and e['team'] == 'away']
+            
             to_remove = set()
-            for i in goals_home_idx[-removed_home:]:
+            for i in goals_home_idx[m:]:
                 to_remove.add(i)
-            for i in goals_away_idx[-removed_away:]:
+            for i in goals_away_idx[m:]:
                 to_remove.add(i)
+                
             events = [e for i, e in enumerate(events) if i not in to_remove]
 
-            stats['home']['on_target'] = max(0, stats['home']['on_target'] - removed_home)
-            stats['away']['on_target'] = max(0, stats['away']['on_target'] - removed_away)
+            stats['home']['on_target'] = max(m, stats['home']['on_target'] - len(to_remove))
+            stats['away']['on_target'] = max(m, stats['away']['on_target'] - len(to_remove))
 
-            total_removed = removed_home + removed_away
+            total_removed = len(to_remove)
             if total_removed > 0:
                 factor = 1.0 - min(0.5, total_removed * 0.15)
                 stats['home']['shots'] = int(stats['home']['shots'] * factor)

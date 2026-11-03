@@ -155,15 +155,16 @@ def schema_to_positions(vec):
 # =========================================================
 # 5. ДОБИВКА ФАНТОМАМИ
 # =========================================================
-def ensure_goalkeeper(team: pd.DataFrame, penalty: float = 30.0) -> pd.DataFrame:
+# =========================================================
+# 5. ДОБИВКА ФАНТОМАМИ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# =========================================================
+def ensure_goalkeeper(team: pd.DataFrame, penalty: float = 0.5) -> pd.DataFrame:
     """
     Если в команде нет игрока с позиция == 'В',
-    добавляем фантомного вратаря 'Н.И. (В)' с рейтингом
-    = mean(ОР полевых) - penalty.
+    добавляем чистого фантомного вратаря 'Н.И. (В)' 
+    с рейтингом = mean(ОР полевых) * penalty.
     """
-    if len(team) == 0:
-        return team
-    if (team['позиция'] == 'В').any():
+    if len(team) == 0 or (team['позиция'] == 'В').any():
         return team
 
     field_players = team[team['позиция'] != 'Т']
@@ -171,36 +172,44 @@ def ensure_goalkeeper(team: pd.DataFrame, penalty: float = 30.0) -> pd.DataFrame
         return team
 
     avg_or = float(field_players['ОР'].mean())
-    phantom_rating = max(0.0, avg_or - penalty)
-
-    template = field_players.iloc[0].copy()
-    r = template.copy()
-    r['Имя'] = f'{PHANTOM_NAME} (В)'
-    r['Имя_чистое'] = f'{PHANTOM_NAME} (В)'
-    r['позиция'] = 'В'
-    r['спец1'] = 'В'
-    r['спец2'] = None
-    r['спец3'] = None
+    phantom_rating = avg_or * penalty
+    
+    # Берем только мета-данные для привязки к клубу/сборной, НЕ КОПИРУЕМ статы!
+    meta = field_players.iloc[0]
+    
+    # Создаем чистый словарь с нуля
+    phantom_data = {
+        'Имя': f'{PHANTOM_NAME} (В)',
+        'Имя_чистое': f'{PHANTOM_NAME} (В)',
+        'позиция': 'В',
+        'спец1': 'В',
+        'спец2': None,
+        'спец3': None,
+        'сборная': meta.get('сборная'),
+        'клуб': meta.get('клуб'),
+        'клуб_название': meta.get('клуб_название'),
+        'клуб_страна': meta.get('клуб_страна'),
+        'Готовность': 0,
+        'Перки': 0,
+        'Состояние': 0,
+        'ОР': phantom_rating,
+    }
+    # Записываем рейтинг во все статы
     for s in STATS:
-        r[s] = phantom_rating
-    r['ОР'] = phantom_rating
-    r['Готовность'] = 0
-    r['Перки'] = 0
-    r['Состояние'] = 0
-
-    phantom = pd.DataFrame([r])
+        phantom_data[s] = phantom_rating
+        
+    phantom = pd.DataFrame([phantom_data])
     base_idx = (team.index.max() + 1) if len(team) else 0
     phantom.index = [base_idx]
-
+    
     return pd.concat([team, phantom], axis=0)
+
 
 def augment_with_phantoms(team: pd.DataFrame,
                           max_total: int = 22,
-                          penalty: float = 30.0) -> pd.DataFrame:
+                          penalty: float = 0.5) -> pd.DataFrame:
     """
-    Добивает команду фантомами до max_total игроков:
-      - сначала гарантируем вратаря (через ensure_goalkeeper);
-      - затем добиваем полевыми 'Н.И. N' с рейтингом mean(ОР полевых) - penalty.
+    Добивает команду чистыми фантомами до max_total игроков.
     """
     if len(team) == 0:
         return team
@@ -211,37 +220,38 @@ def augment_with_phantoms(team: pd.DataFrame,
     # 2) средний ОР полевых (без вратаря и тренера)
     field_players = team[(team['позиция'] != 'Т') & (team['позиция'] != 'В')]
     if len(field_players) == 0:
-        # если совсем никого — берём вратаря как эталон
         field_players = team[team['позиция'] != 'Т']
+        
     avg_or = float(field_players['ОР'].mean())
-    phantom_rating = max(0.0, avg_or - penalty)
+    phantom_rating = avg_or * penalty
 
     needed = max(0, max_total - len(team))
     if needed == 0:
         return team
 
-    template = field_players.iloc[0].copy()
-
+    meta = field_players.iloc[0]
     rows = []
     for k in range(needed):
-        r = template.copy()
-        r['Имя'] = f'{PHANTOM_NAME} {k + 1}'
-        r['Имя_чистое'] = f'{PHANTOM_NAME} {k + 1}'
-        r['позиция'] = 'П'
-        r['спец1'] = 'ЦПЗ'
-        r['спец2'] = None
-        r['спец3'] = None
+        # Создаем чистый словарь с нуля для каждого фантома
+        phantom_data = {
+            'Имя': f'{PHANTOM_NAME} {k + 1}',
+            'Имя_чистое': f'{PHANTOM_NAME} {k + 1}',
+            'позиция': 'П',
+            'спец1': 'ЦПЗ',
+            'спец2': None,
+            'спец3': None,
+            'сборная': meta.get('сборная'),
+            'клуб': meta.get('клуб'),
+            'клуб_название': meta.get('клуб_название'),
+            'клуб_страна': meta.get('клуб_страна'),
+            'Готовность': 0,
+            'Перки': 0,
+            'Состояние': 0,
+            'ОР': phantom_rating,
+        }
         for s in STATS:
-            r[s] = phantom_rating
-        r['ОР'] = phantom_rating
-        r['Готовность'] = 0
-        r['Перки'] = 0
-        r['Состояние'] = 0
-        r['сборная'] = template.get('сборная')
-        r['клуб'] = template.get('клуб')
-        r['клуб_название'] = template.get('клуб_название')
-        r['клуб_страна'] = template.get('клуб_страна')
-        rows.append(r)
+            phantom_data[s] = phantom_rating
+        rows.append(phantom_data)
 
     phantom_df = pd.DataFrame(rows)
     base_idx = (team.index.max() + 1) if len(team) else 0
@@ -449,14 +459,13 @@ def coach_profile(coach):
     return {s: F_MAX * (float(coach[s]) / 100.0) for s in STATS}
 
 def apply_coach(player, prof):
-    """Доминанта не меняется; остальные статы × (1 + f(c[dom]))."""
+    """Все статы × (1 + f(c[dom]))."""
     base = {s: float(player[s]) for s in STATS}
     if prof is None:
         return base
     dom_i = _dominant_idx(player)
     boost = prof[STATS[dom_i]]
-    return {s: (base[s] if i == dom_i else base[s] * (1.0 + boost))
-            for i, s in enumerate(STATS)}
+    return {s: base[s] * (1.0 + boost) for i, s in enumerate(STATS)}
 
 def apply_coach_to_team(team: pd.DataFrame, coach) -> pd.DataFrame:
     prof = coach_profile(coach)
