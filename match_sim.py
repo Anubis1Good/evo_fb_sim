@@ -332,7 +332,7 @@ def simulate_match(lineup_home, coach_home,
     bench_away = bench_away or []
 
     def avg_field_or(lineup):
-        vals = [float(p['ОР']) for pos, plist in lineup.items() for p in plist]
+        vals = [float(p['ОР_эфф']) for pos, plist in lineup.items() for p in plist]
         return float(np.mean(vals)) if vals else 60.0
 
     OR_home = avg_field_or(lineup_home)
@@ -503,7 +503,7 @@ def simulate_match(lineup_home, coach_home,
         a = float(att['Удар']) * _fatigue_mult(fatigue.get(att['Имя_чистое'], 0)) * _ready_mult(att)
         d = (float(dfd['Отбор']) * _fatigue_mult(fatigue.get(dfd['Имя_чистое'], 0)) * _ready_mult(dfd)
              if dfd is not None else 50.0)
-        g = float(gk['ОР']) * _ready_mult(gk) if gk is not None else 50.0
+        g = float(gk['ОР_эфф']) * _ready_mult(gk) if gk is not None else 50.0
         base = 0.10 + 0.10 * _sigmoid((a - d) / 30) - 0.03 * _sigmoid((g - a) / 35)
         perks = _parse_perks(att.get('Перки'))
         f = fatigue.get(att['Имя_чистое'], 0)
@@ -707,7 +707,7 @@ def simulate_match(lineup_home, coach_home,
                 
         if replacement is None:
             # Если нет игрока на ту же позицию, берем самого сильного из доступных
-            best_i, best_pos, best_player = max(available_subs, key=lambda x: float(x[2]['ОР']))
+            best_i, best_pos, best_player = max(available_subs, key=lambda x: float(x[2]['ОР_эфф']))
             replacement = (best_i, best_player)
             
         _, player_in = replacement
@@ -756,7 +756,7 @@ def simulate_match(lineup_home, coach_home,
                     break
                     
             if replacement is None:
-                best_i, best_pos, best_player = max(available_subs, key=lambda x: float(x[2]['ОР']))
+                best_i, best_pos, best_player = max(available_subs, key=lambda x: float(x[2]['ОР_эфф']))
                 replacement = (best_i, best_player)
                 
             _, player_in = replacement
@@ -965,7 +965,7 @@ def simulate_match(lineup_home, coach_home,
             att_shot = float(att['Удар']) * _get_player_effective_mult(att, fatigue)
             att_shot *= (1 + _perk_sum(att_perks, 'shot', att_f))
 
-            gk_rating = float(gk['ОР']) * _get_player_effective_mult(gk, fatigue) if gk is not None else 50.0
+            gk_rating = float(gk['ОР_эфф']) * _get_player_effective_mult(gk, fatigue) if gk is not None else 50.0
 
             # ДУЭЛЬ: Удар бьющего vs ОР вратаря
             # Чем больше разница (att_shot - gk_rating), тем легче попасть в створ
@@ -1042,7 +1042,7 @@ def simulate_match(lineup_home, coach_home,
         lineup_att = lineup_home if side == 'home' else lineup_away
         lineup_def = lineup_away if side == 'home' else lineup_home
         gk = pick_gk(lineup_def)
-        gk_rating = float(gk['ОР']) * _get_player_effective_mult(gk, fatigue) if gk is not None else 50.0
+        gk_rating = float(gk['ОР_эфф']) * _get_player_effective_mult(gk, fatigue) if gk is not None else 50.0
         gk_perks = _parse_perks(gk.get('Перки')) if gk is not None else []
         gk_f = fatigue.get(gk['Имя_чистое'], 0) if gk is not None else 0
         gk_save = _perk_sum(gk_perks, 'save', gk_f)
@@ -1309,7 +1309,7 @@ def simulate_penalty_shootout(lineup_home, coach_home,
         sh = float(shooter['Удар']) * _ready_mult(shooter)
         tactics = float(shooter['Тактика']) * _ready_mult(shooter)
         if gk is not None:
-            g = float(gk['ОР']) * _ready_mult(gk)
+            g = float(gk['ОР_эфф']) * _ready_mult(gk)
             gk_perks = _parse_perks(gk.get('Перки'))
             gk_f = 0  # в пенальти усталость не учитываем
             save_bonus = _perk_sum(gk_perks, 'save', gk_f)
